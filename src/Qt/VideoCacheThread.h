@@ -14,7 +14,6 @@
 #define OPENSHOT_VIDEO_CACHE_THREAD_H
 
 #include "ReaderBase.h"
-
 #include <AppConfig.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -61,6 +60,8 @@ namespace openshot
 
 	/// Set the current thread's reader
 	void Reader(ReaderBase *new_reader) { reader=new_reader; Play(); };
+
+    int MaxFramesAhead();
 
 	/// Parent class of VideoCacheThread
 	friend class PlayerPrivate;
