@@ -19,15 +19,10 @@
 #include <thread>    // for std::this_thread::sleep_for
 #include <chrono>    // for std::chrono milliseconds, high_resolution_clock
 
-// REMOVE BEFORE FLIGHT
-#include <fstream>
-#include <cstring>
-#include <sstream>
-#include <ctime>
 
 namespace openshot
 {
-    int close_to_sync = 5;
+    bool paused = true; // Used to know when the first 'un-paused' loop is.
     // Constructor
     PlayerPrivate::PlayerPrivate(openshot::RendererBase *rb)
     : renderer(rb), Thread("player"), video_position(1), audio_position(0)
@@ -73,38 +68,22 @@ namespace openshot
         int64_t bytes_per_frame = (reader->info.height * reader->info.width * 4) +
           (reader->info.sample_rate * reader->info.channels * 4);
 
-        // Open output file
-        std::ofstream data_file;
-        time_t now = time(0);
-        std::tm *t = std::localtime(&now);
-        std::stringstream file_name;
-        file_name << "Timing_data " << t->tm_hour << " "
-                  << t->tm_min << " " << t->tm_sec << ".csv";
-        data_file.open(file_name.str());
-        data_file << "corection: pow(avg,3) * duration / 32"<< std::endl;
-        data_file << "video_position" << "," << "audio_position" << "," << "video_frame_diff" << std::endl;
-        t=NULL;
-        delete t;
-
         while (!threadShouldExit()) {
             // Calculate on-screen time for a single frame
             const auto frame_duration = double_micro_sec(1000000.0 / reader->info.fps.ToDouble());
             const auto max_sleep = frame_duration * 4; ///< Don't sleep longer than X times a frame duration
-            // int64_t bytes_per_frame = (reader->info.height * reader->info.width * 4) +
-            //   (reader->info.sample_rate * reader->info.channels * 4);
-            // int max_frames_ahead;
-            const int max_frames_ahead = videoCache->MaxFramesAhead();
-            // if (reader->GetCache() && reader->GetCache()->GetMaxBytes() > 0) {
-            //   // Use 1/2 the cache size (so our cache will be 50% before the play-head, and 50% after it)
-            //   max_frames_ahead = (reader->GetCache()->GetMaxBytes() / bytes_per_frame) / 2;
-            // }
+            const int max_frames_ahead = videoCache->MaxFramesAhead(); // TODO: make reader cache size available to this thread
 
+            auto time1 = std::chrono::high_resolution_clock::now();
             // Get the current video frame (if it's different)
             frame = getFrame();
+            auto time2 = std::chrono::high_resolution_clock::now();
+            auto get_frame_time = time2 - time1;
 
             // Pausing Code (if frame has not changed)
             if ((speed == 0 && video_position == last_video_position) || (video_position > reader->info.video_length))
             {
+                paused = true;
                 // Set start time to prepare for next playback period and reset frame counter
                 start_time = std::chrono::high_resolution_clock::now();
                 playback_frames = 0;
@@ -113,9 +92,15 @@ namespace openshot
                   auto nothing = reader->GetFrame(video_position + count++);
 
                 // Sleep for a fraction of frame duration
-                start_time = std::chrono::high_resolution_clock::now();
                 std::this_thread::sleep_for(frame_duration / 4);
                 continue;
+            } else if (paused == true) {
+                start_time = std::chrono::high_resolution_clock::now() /* + time_to_empty_buffer */;
+                auto adjustment = std::chrono::milliseconds(int(audioPlayback->source->getReaderInfo().duration));
+                std::cout << "duration: " << audioPlayback->source->getReaderInfo().duration << std::endl;
+                std::cout << "adjustment: " << adjustment.count() << std::endl;
+                start_time += adjustment;
+                paused = false;
             }
 
             // Set the video frame on the video thread and render frame
@@ -136,21 +121,21 @@ namespace openshot
                     audioPlayback->Seek(video_position);
                 }
             }
-            data_file << video_position << "," << audio_position << "," << video_frame_diff << std::endl;
 
             // Calculate the diff between 'now' and the predicted frame end time
             auto current_time = std::chrono::high_resolution_clock::now();
-            auto remaining_time = double_micro_sec(start_time + (frame_duration * playback_frames) - current_time);
+            auto remaining_time = double_micro_sec( start_time + (frame_duration * playback_frames) - current_time);
+
+            // Cache frames ahead
             int count = 0;
-            // if (remaining_time > frame_duration / 2){
-            while ((remaining_time > frame_duration / 5) && speed != 0){
-              count += 1;
-              auto nothing = reader->GetFrame(video_position + count);
-              current_time = std::chrono::high_resolution_clock::now();
-              remaining_time = double_micro_sec(start_time + (frame_duration * playback_frames) - current_time);
-              //if count > max frames ahead, break
+            while ((remaining_time > get_frame_time * 2) && count <= max_frames_ahead){
+                // As long as remaining time is more than twice the time to get the last frame, get another
+                count += 1;
+                reader->GetFrame(video_position + count);
+                // Update remaining_time
+                current_time = std::chrono::high_resolution_clock::now();
+                remaining_time = double_micro_sec(start_time + (frame_duration * playback_frames) - current_time);
             }
-            std::cout << "Got " << count << " frames" << std::endl;
 
             // Sleep to display video image on screen
             if (remaining_time > remaining_time.zero() ) {
